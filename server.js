@@ -24,7 +24,7 @@ function execPs(cmd) {
 }
 
 async function getHelperStatus(lockName) {
-  const cmd = `$p = Get-Content -LiteralPath \\"$env:TEMP\\${lockName}\\" -ErrorAction SilentlyContinue; if(-not $p){ Write-Output 'DEAD' } else { $proc = Get-Process -Id ([int]$p) -ErrorAction SilentlyContinue; if($proc){ Write-Output \"ALIVE:$p\" } else { Write-Output 'DEAD' } }`;
+  const cmd = `$p = Get-Content -LiteralPath (Join-Path $env:TEMP '${lockName}') -ErrorAction SilentlyContinue; if(-not $p){ Write-Output 'DEAD' } else { $proc = Get-Process -Id ([int]$p.Trim()) -ErrorAction SilentlyContinue; if($proc){ Write-Output \"ALIVE:$($p.Trim())\" } else { Write-Output 'DEAD' } }`;
   const { stdout } = await execPs(cmd);
   if (stdout.startsWith('ALIVE:')) {
     const pid = stdout.split(':')[1];
@@ -128,14 +128,25 @@ app.get('/api/status', async (req, res) => {
   });
 });
 
-// Helpers to start helpers
+// Helpers to start helpers — spawn via Node (detached:false keeps helper alive as child of server; avoids quoting hell)
 async function startHelper(helperScript) {
-  const ps = `Start-Process powershell -ArgumentList "-NoProfile -WindowStyle Hidden -File \\"${helperScript}\\"" -WindowStyle Hidden`;
-  const { stdout, stderr } = await execPs(ps);
-  return { stdout, stderr };
+  try {
+    const child = spawn('powershell', ['-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', helperScript], {
+      windowsHide: true,
+      detached: false,
+      stdio: 'ignore',
+    });
+    // don't unref when detached:false — keep reference so helper stays alive while server alive
+    return { ok: true, pid: child.pid };
+  } catch (e) {
+    const safe = helperScript.replace(/'/g, "''");
+    const ps = `Start-Process -FilePath powershell -ArgumentList '-NoProfile','-WindowStyle','Hidden','-ExecutionPolicy','Bypass','-File','${safe}' -WindowStyle Hidden`;
+    const { stdout, stderr, err } = await execPs(ps);
+    return { stdout, stderr, err, fallback: true };
+  }
 }
 async function stopHelper(lockName) {
-  const ps = `$p = Get-Content -LiteralPath \\"$env:TEMP\\${lockName}\\" -ErrorAction SilentlyContinue; if($p){ Stop-Process -Id ([int]$p) -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath \\"$env:TEMP\\${lockName}\\" -Force -ErrorAction SilentlyContinue; Write-Output 'stopped' } else { Write-Output 'no-lock' }`;
+  const ps = `$p = Get-Content -LiteralPath (Join-Path $env:TEMP '${lockName}') -ErrorAction SilentlyContinue; if($p){ Stop-Process -Id ([int]$p.Trim()) -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath (Join-Path $env:TEMP '${lockName}') -Force -ErrorAction SilentlyContinue; Write-Output 'stopped' } else { Write-Output 'no-lock' }`;
   return execPs(ps);
 }
 
@@ -164,12 +175,13 @@ app.post('/api/toggle', async (req, res) => {
       const st = await getHelperStatus('.blender-helper-local.lock');
       if (st.alive) {
         const r = await stopHelper('.blender-helper-local.lock');
+        await new Promise(r => setTimeout(r, 800));
         const after = await getHelperStatus('.blender-helper-local.lock');
         return res.json({ action: 'stop', before: st, after, ok: !after.alive, raw: r.stdout });
       } else {
         const helper = path.join(CONTROL_SCRIPTS_ROOT, 'BlenderHelper-Local.ps1');
         await startHelper(helper);
-        await new Promise(r => setTimeout(r, 1500));
+        await new Promise(r => setTimeout(r, 3000));
         const after = await getHelperStatus('.blender-helper-local.lock');
         return res.json({ action: 'start', before: st, after, ok: after.alive });
       }
@@ -178,12 +190,13 @@ app.post('/api/toggle', async (req, res) => {
       const st = await getHelperStatus('.blender-helper.lock');
       if (st.alive) {
         const r = await stopHelper('.blender-helper.lock');
+        await new Promise(r => setTimeout(r, 800));
         const after = await getHelperStatus('.blender-helper.lock');
         return res.json({ action: 'stop', before: st, after, ok: !after.alive, raw: r.stdout });
       } else {
         const helper = path.join(CONTROL_SCRIPTS_ROOT, 'BlenderHelper.ps1');
         await startHelper(helper);
-        await new Promise(r => setTimeout(r, 1500));
+        await new Promise(r => setTimeout(r, 3000));
         const after = await getHelperStatus('.blender-helper.lock');
         return res.json({ action: 'start', before: st, after, ok: after.alive });
       }
@@ -192,12 +205,13 @@ app.post('/api/toggle', async (req, res) => {
       const st = await getHelperStatus('.houdini-helper-local.lock');
       if (st.alive) {
         const r = await stopHelper('.houdini-helper-local.lock');
+        await new Promise(r => setTimeout(r, 800));
         const after = await getHelperStatus('.houdini-helper-local.lock');
         return res.json({ action: 'stop', before: st, after, ok: !after.alive, raw: r.stdout });
       } else {
         const helper = path.join(CONTROL_SCRIPTS_ROOT, 'wakatime-houdini.ps1');
         await startHelper(helper);
-        await new Promise(r => setTimeout(r, 1500));
+        await new Promise(r => setTimeout(r, 3000));
         const after = await getHelperStatus('.houdini-helper-local.lock');
         return res.json({ action: 'start', before: st, after, ok: after.alive });
       }
@@ -208,6 +222,55 @@ app.post('/api/toggle', async (req, res) => {
   }
 });
 
+// Helper Dashboard — run inline and return output to show inside the phone app
+async function runHelperDashboard() {
+  return new Promise((resolve) => {
+    const src = path.join(CONTROL_SCRIPTS_ROOT, 'Helper Dashboard.ps1');
+    let txt = '';
+    try { txt = fs.readFileSync(src, 'utf8'); } catch { return resolve({ stdout: 'Helper Dashboard.ps1 not found', ok: false }); }
+    // Remove interactive / clear lines, keep logic
+    const filtered = txt.split(/\r?\n/).filter(l => !l.match(/^\s*Clear-Host|^\s*Read-Host/)).join('\r\n');
+    const tmp = path.join(process.env.TEMP, `helper_dash_${Date.now()}.ps1`);
+    // Force non-interactive: pipe output as plain text, ensure colors are still captured via Write-Host -> write to host but we capture via transcript
+    const wrapper = `$orig = "${tmp}"; Start-Transcript -Path "$env:TEMP\\helper_dash_out.txt" -Force | Out-Null; try { . "${tmp.replace(/"/g, '""')}" } catch { Write-Output $_ } ; Stop-Transcript | Out-Null; Get-Content "$env:TEMP\\helper_dash_out.txt" -Raw | Write-Output`;
+    // Simpler: just exec the filtered script and capture Write-Host via redirect
+    fs.writeFileSync(tmp, filtered, 'utf8');
+    exec(`powershell -NoProfile -ExecutionPolicy Bypass -File "${tmp}"`, { timeout: 20000, encoding: 'utf8' }, (err, stdout, stderr) => {
+      let out = (stdout || '') + (stderr || '');
+      // Fallback: also try transcript if stdout empty (Write-Host goes to host)
+      if (!out.trim()) {
+        try { out = fs.readFileSync(path.join(process.env.TEMP, 'helper_dash_out.txt'), 'utf8'); } catch {}
+      }
+      try { fs.unlinkSync(tmp); } catch {}
+      resolve({ stdout: out.trim() || 'No output (check helper dashboard on PC)', ok: !err });
+    });
+  });
+}
+
+// Structured dashboard for in-app rendering (no colors, JSON)
+async function getDashboardJson() {
+  const [blLocal, blServer, houdiniLocal, houdiniServer, localBlender, localHoudini, mcp] = await Promise.all([
+    getHelperStatus('.blender-helper-local.lock'),
+    getHelperStatus('.blender-helper.lock'),
+    getHelperStatus('.houdini-helper-local.lock'),
+    getHelperStatus('.houdini-helper.lock'),
+    execPs(`$p = Get-Process -Name blender -ErrorAction SilentlyContinue | Select-Object -First 1; if($p){ $t=$p.MainWindowTitle; Write-Output "ALIVE:$($p.Id):$t" } else { Write-Output 'DEAD' }`),
+    execPs(`$p = Get-Process -Name houdini -ErrorAction SilentlyContinue | Select-Object -First 1; if(-not $p){ $p = Get-Process -Name hython -ErrorAction SilentlyContinue | Select-Object -First 1 }; if($p){ Write-Output "ALIVE:$($p.Id)" } else { Write-Output 'DEAD' }`),
+    getMcpOrphanStatus(),
+  ]);
+  return {
+    helpers: { blLocal, blServer, houdiniLocal, houdiniServer },
+    localApps: { blender: localBlender.stdout, houdini: localHoudini.stdout },
+    mcp,
+    time: new Date().toISOString(),
+  };
+}
+
+app.get('/api/dashboard', async (req, res) => {
+  const json = await getDashboardJson();
+  res.json(json);
+});
+
 // Run one-shot
 app.post('/api/run', async (req, res) => {
   const { id } = req.body;
@@ -215,6 +278,13 @@ app.post('/api/run', async (req, res) => {
   const item = items.find(x => x.id === id);
   if (!item) return res.status(404).json({ error: 'not found' });
   if (item.id === 'openchamber-server') return res.status(400).json({ error: 'use toggle for openchamber' });
+
+  // Special: Helper Dashboard — return output to show inside app
+  if (id === '_HELPER_DASHBOARD') {
+    const r = await runHelperDashboard();
+    const json = await getDashboardJson();
+    return res.json({ ok: true, output: r.stdout, dashboard: json });
+  }
 
   // Special: MCP orphan guard - only when no live sessions
   if (id === 'MCP_Orphan_Cleanup') {

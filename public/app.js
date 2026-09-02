@@ -116,6 +116,29 @@ async function doToggle(it){
   load();
 }
 
+function closeModal(){ document.getElementById('modal').classList.remove('open'); }
+function openModal(title, html){ document.getElementById('modalTitle').textContent = title; document.getElementById('modalBody').innerHTML = html; document.getElementById('modal').classList.add('open'); }
+
+function renderDashboard(d){
+  if(!d) return '<pre>no data</pre>';
+  const h = d.helpers || {};
+  const mk = (label, st) => `<div class="dashRow"><span><span class="dot ${st?.alive ? 'on' : 'off'}"></span>${label}</span><b style="color:${st?.alive ? '#2ecc71' : '#ff5a5a'}">${st?.alive ? 'ALIVE · PID '+st.pid : 'DEAD'}</b></div>`;
+  let html = '<div class="dashGrid">';
+  html += mk('Blender Local', h.blLocal);
+  html += mk('Blender Server', h.blServer);
+  html += mk('Houdini Local', h.houdiniLocal);
+  html += mk('Houdini Server', h.houdiniServer);
+  // local apps from strings like ALIVE:123:Title
+  const lb = d.localApps?.blender || 'DEAD';
+  const lh = d.localApps?.houdini || 'DEAD';
+  const mcp = d.mcp ? `${d.mcp.sessions} session(s) — ${d.mcp.canClean ? 'can clean' : 'blocked (close OpenChamber)'}` : '';
+  html += `<div class="dashRow"><span>Blender App</span><span style="font-size:11px;color:#888">${lb.startsWith('ALIVE') ? lb : 'not running'}</span></div>`;
+  html += `<div class="dashRow"><span>Houdini App</span><span style="font-size:11px;color:#888">${lh.startsWith('ALIVE') ? lh : 'not running'}</span></div>`;
+  html += `<div class="dashRow"><span>MCP</span><span style="font-size:11px;color:#888">${mcp}</span></div>`;
+  html += '</div>';
+  return html;
+}
+
 async function doRun(it, btn){
   btn.disabled = true;
   btn.textContent = '…';
@@ -123,7 +146,16 @@ async function doRun(it, btn){
     const r = await fetch('/api/run', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id: it.id})});
     const j = await r.json();
     if(j.error){ showToast(j.error, false); }
-    else { showToast(`${it.name} launched ✓`); if(j.output) console.log(j.output); }
+    else {
+      if(it.id === '_HELPER_DASHBOARD'){
+        const dashHtml = renderDashboard(j.dashboard) + (j.output ? `<pre>${j.output.replace(/</g,'&lt;')}</pre>` : '');
+        openModal('Helper Dashboard', dashHtml);
+        showToast('Dashboard loaded ✓');
+      } else {
+        showToast(`${it.name} launched ✓`);
+        if(j.output){ openModal(it.name, `<pre>${j.output.replace(/</g,'&lt;')}</pre>`); }
+      }
+    }
   }catch(e){ showToast(String(e), false); }
   btn.disabled = false;
   btn.textContent = '▶ Run';
