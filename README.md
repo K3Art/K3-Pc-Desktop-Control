@@ -1,9 +1,9 @@
 # Desktop Controls Launcher — Mobile for `Desktop\Controls`
 
-Mobile web panel for `C:\Users\User\Desktop\Controls` (8 shortcuts + GIT_P4_Link). Tap to RUN or TOGGLE.
+Mobile web panel for `C:\Users\Kim\Desktop\Controls` (8 shortcuts + GIT_P4_Link). Tap to RUN or TOGGLE.
 
-**URL (phone on Tailscale):** `http://100.99.206.17:3157`  
-**Local:** `http://127.0.0.1:3157` / `http://192.168.1.113:3157`
+**URL (phone on Tailscale):** `http://100.92.107.30:3157`  
+**Local:** `http://127.0.0.1:3157`
 
 ## Features
 - **Real ON/OFF for OpenChamber Server** — not just firing the `.lnk` blindly. Status via `Get-NetTCPConnection -LocalPort 3000 -State Listen` + `openchamber stop` / `openchamber --lan --port 3000 --ui-password ...` with port verification after. Green RUNNING / Red STOPPED.
@@ -14,7 +14,8 @@ Mobile web panel for `C:\Users\User\Desktop\Controls` (8 shortcuts + GIT_P4_Link
 ## Run
 ```
 node server.js
-# auto-start via Startup: %APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\Desktop Controls Launcher.lnk
+# auto-start: Scheduled Task "DesktopControlsLauncher" runs run-hidden.vbs -> run-forever.ps1
+# run-forever.ps1 is a single-instance watchdog: restarts node on :3157 if it stops
 ```
 
 ## API

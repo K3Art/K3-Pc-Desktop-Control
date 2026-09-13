@@ -7,9 +7,9 @@ import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-const PORT = 3157;
-const CONTROLS_DIR = 'C:\\Users\\User\\Desktop\\Controls';
-const CONTROL_SCRIPTS_ROOT = 'F:\\NextCloud\\_AI_SYSTEMS\\Obsidian Vault\\Kims_Documentation_Vault\\Scripts_Tools\\_Control';
+const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3157;
+const CONTROLS_DIR = 'C:\\Users\\Kim\\Desktop\\Controls';
+const CONTROL_SCRIPTS_ROOT = 'D:\\Nextcloud\\_AI_SYSTEMS\\Obsidian Vault\\Kims_Documentation_Vault\\Scripts_Tools\\_Control';
 
 app.use(cors());
 app.use(express.json());
@@ -58,7 +58,7 @@ function scanControls() {
     id: 'openchamber-server',
     name: 'OpenChamber Server',
     file: 'OpenChamber Server.lnk',
-    target: 'F:\\NextCloud\\_AI_CORE_SYSTEMS\\02_apps\\openchamber-server\\OpenChamber Server.exe',
+    target: 'D:\\Nextcloud\\_AI_SYSTEMS\\_AI_CORE_SYSTEMS\\02_apps\\openchamber-server\\OpenChamber Server.exe',
     dir: 'VIRTUAL',
     type: 'toggle',
     icon: '🟣',
@@ -292,7 +292,7 @@ app.post('/api/run', async (req, res) => {
     if (!mcp.canClean) {
       return res.status(409).json({ error: `Blocked: ${mcp.sessions} live OpenChamber session(s) running. Close OpenChamber first.` });
     }
-    const guard = 'F:\\NextCloud\\_AI_CORE_SYSTEMS\\00_core\\scripts\\mcp_orphan_guard\\cleanup_orphan_mcp.ps1';
+    const guard = 'D:\\Nextcloud\\_AI_SYSTEMS\\_AI_CORE_SYSTEMS\\00_core\\scripts\\mcp_orphan_guard\\cleanup_orphan_mcp.ps1';
     const { stdout } = await execPs(`powershell -NoProfile -ExecutionPolicy Bypass -File \\"${guard}\\" | Out-String`);
     return res.json({ ok: true, output: stdout });
   }
@@ -323,7 +323,7 @@ app.post('/api/run', async (req, res) => {
 
 app.get('/api/health', (req, res) => res.json({ ok: true, controlsDir: CONTROLS_DIR }));
 
-const TAILSCALE_IP = '100.99.206.17';
+const TAILSCALE_IP = '100.92.107.30';
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Controls launcher on http://localhost:${PORT} and http://${TAILSCALE_IP}:${PORT}`);
   console.log(`Serving ${CONTROLS_DIR}`);

@@ -1,9 +1,13 @@
 {
-  "name": "Controls Launcher",
-  "short_name": "Controls",
+  "name": "K3 Controls",
+  "short_name": "K3 Controls",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0f0f12",
-  "theme_color": "#1a1a1e",
-  "icons": []
+  "background_color": "#0a0a0b",
+  "theme_color": "#0a0a0b",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
 }
