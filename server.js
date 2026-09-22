@@ -10,6 +10,8 @@ const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3157;
 const CONTROLS_DIR = 'C:\\Users\\Kim\\Desktop\\Controls';
 const CONTROL_SCRIPTS_ROOT = 'D:\\Nextcloud\\_AI_SYSTEMS\\Obsidian Vault\\Kims_Documentation_Vault\\Scripts_Tools\\_Control';
+const STUDIO_HELPER = path.join(CONTROL_SCRIPTS_ROOT, 'K3-Concept-Studio.ps1');
+const STUDIO_PORT = 8790;
 
 app.use(cors());
 app.use(express.json());
@@ -51,6 +53,15 @@ async function getMcpOrphanStatus() {
   return { sessions: isNaN(count) ? 0 : count, canClean: (isNaN(count) ? true : count === 0) };
 }
 
+async function getStudioStatus() {
+  const cmd = `$c = Get-NetTCPConnection -LocalPort ${STUDIO_PORT} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if($c){ Write-Output "ALIVE:$($c.OwningProcess)" } else { Write-Output 'DEAD' }`;
+  const { stdout } = await execPs(cmd);
+  if (stdout.startsWith('ALIVE:')) {
+    return { alive: true, pid: parseInt(stdout.split(':')[1], 10) };
+  }
+  return { alive: false, pid: null };
+}
+
 function scanControls() {
   const items = [];
   // virtual OpenChamber Server entry - always first, toggleable
@@ -63,6 +74,18 @@ function scanControls() {
     type: 'toggle',
     icon: '🟣',
     description: 'Web UI on :3000 — real ON/OFF via port check, not just .lnk',
+  });
+
+  // virtual K3 Concept Studio entry - always a toggle, port-checked on :8790
+  items.push({
+    id: 'studio-server',
+    name: 'K3 Concept Studio',
+    file: 'K3-Concept-Studio.ps1',
+    target: STUDIO_HELPER,
+    dir: 'VIRTUAL',
+    type: 'toggle',
+    icon: '🎨',
+    description: 'Concept review studio on :8790 — real ON/OFF via port check',
   });
 
   const scanDir = (dir, sub) => {
@@ -112,12 +135,13 @@ app.get('/api/items', (req, res) => {
 
 // API: status of all toggles
 app.get('/api/status', async (req, res) => {
-  const [oc, blLocal, blServer, houdini, mcp] = await Promise.all([
+  const [oc, blLocal, blServer, houdini, mcp, studio] = await Promise.all([
     getOpenChamberStatus(),
     getHelperStatus('.blender-helper-local.lock'),
     getHelperStatus('.blender-helper.lock'),
     getHelperStatus('.houdini-helper-local.lock'),
     getMcpOrphanStatus(),
+    getStudioStatus(),
   ]);
   res.json({
     'openchamber-server': oc,
@@ -125,6 +149,7 @@ app.get('/api/status', async (req, res) => {
     'Blender_Server_Control': blServer,
     'Houdini_Control': houdini,
     mcpOrphan: mcp,
+    'studio-server': studio,
   });
 });
 
@@ -168,6 +193,22 @@ app.post('/api/toggle', async (req, res) => {
         exec(`cmd /c openchamber --lan --port 3000 --ui-password korakot1179`, { windowsHide: true });
         await new Promise(r => setTimeout(r, 2500));
         const after = await getOpenChamberStatus();
+        return res.json({ action: 'start', before: st, after, ok: after.alive });
+      }
+    }
+    if (id === 'studio-server') {
+      const st = await getStudioStatus();
+      if (st.alive) {
+        // STOP - helper is PID-targeted internally, then verify port released
+        const { stdout } = await execPs(`powershell -NoProfile -ExecutionPolicy Bypass -File '${STUDIO_HELPER}' -Stop`);
+        await new Promise(r => setTimeout(r, 2500));
+        const after = await getStudioStatus();
+        return res.json({ action: 'stop', before: st, after, ok: !after.alive, raw: stdout });
+      } else {
+        // START - helper spawns node hidden, then verify port listening
+        await startHelper(STUDIO_HELPER);
+        await new Promise(r => setTimeout(r, 3500));
+        const after = await getStudioStatus();
         return res.json({ action: 'start', before: st, after, ok: after.alive });
       }
     }

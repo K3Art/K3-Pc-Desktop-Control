@@ -35,6 +35,7 @@ function statusFor(item) {
   if (item.id === 'Blender_Local_Control') return status['Blender_Local_Control'];
   if (item.id === 'Blender_Server_Control') return status['Blender_Server_Control'];
   if (item.id === 'Houdini_Control') return status['Houdini_Control'];
+  if (item.id === 'studio-server') return status['studio-server'];
   if (item.id === 'MCP_Orphan_Cleanup') return status.mcpOrphan;
   return null;
 }
