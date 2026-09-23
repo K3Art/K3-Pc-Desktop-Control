@@ -9,7 +9,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3157;
 const CONTROLS_DIR = 'C:\\Users\\Kim\\Desktop\\Controls';
-const CONTROL_SCRIPTS_ROOT = 'D:\\Nextcloud\\_AI_SYSTEMS\\Obsidian Vault\\Kims_Documentation_Vault\\Scripts_Tools\\_Control';
+const CONTROL_SCRIPTS_ROOT = 'D:\\Nextcloud\\_AI_SYSTEMS\\tools\\_Control';
 const STUDIO_HELPER = path.join(CONTROL_SCRIPTS_ROOT, 'K3-Concept-Studio.ps1');
 const STUDIO_PORT = 8790;
 
