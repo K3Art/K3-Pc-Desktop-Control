@@ -12,6 +12,22 @@ const CONTROLS_DIR = 'C:\\Users\\Kim\\Desktop\\Controls';
 const CONTROL_SCRIPTS_ROOT = 'D:\\Nextcloud\\_AI_SYSTEMS\\tools\\_Control';
 const STUDIO_HELPER = path.join(CONTROL_SCRIPTS_ROOT, 'K3-Concept-Studio.ps1');
 const STUDIO_PORT = 8790;
+const REVIEW_HELPER = path.join(CONTROL_SCRIPTS_ROOT, 'K3-Review-Server.ps1');
+const REVIEW_PORT = 8901;
+const WAKA_SESSION_TOGGLE = path.join(process.env.USERPROFILE || process.env.HOME || '~', '.config', 'opencode', 'wakatime-session.enabled.json');
+
+function getWakaSessionStatus() {
+  try {
+    const j = JSON.parse(fs.readFileSync(WAKA_SESSION_TOGGLE, 'utf8'));
+    return { alive: j.enabled !== false, enabled: j.enabled !== false };
+  } catch {
+    return { alive: true, enabled: true }; // missing file → plugin defaults to on
+  }
+}
+
+function setWakaSessionEnabled(enabled) {
+  fs.writeFileSync(WAKA_SESSION_TOGGLE, JSON.stringify({ enabled }, null, 2) + '\n', 'utf8');
+}
 
 app.use(cors());
 app.use(express.json());
@@ -62,6 +78,15 @@ async function getStudioStatus() {
   return { alive: false, pid: null };
 }
 
+async function getReviewStatus() {
+  const cmd = `$c = Get-NetTCPConnection -LocalPort ${REVIEW_PORT} -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if($c){ Write-Output "ALIVE:$($c.OwningProcess)" } else { Write-Output 'DEAD' }`;
+  const { stdout } = await execPs(cmd);
+  if (stdout.startsWith('ALIVE:')) {
+    return { alive: true, pid: parseInt(stdout.split(':')[1], 10) };
+  }
+  return { alive: false, pid: null };
+}
+
 function scanControls() {
   const items = [];
   // virtual OpenChamber Server entry - always first, toggleable
@@ -88,6 +113,42 @@ function scanControls() {
     description: 'Concept review studio on :8790 — real ON/OFF via port check',
   });
 
+  // virtual K3 AI Workspace review API entry - always a toggle, port-checked on :8901
+  items.push({
+    id: 'review-server',
+    name: 'K3 Review Server',
+    file: 'K3-Review-Server.ps1',
+    target: REVIEW_HELPER,
+    dir: 'VIRTUAL',
+    type: 'toggle',
+    icon: '📝',
+    description: 'Workspace Approve / Reject / Comment API on :8901 — saves each card reviews.json',
+  });
+
+  // virtual WakaTime session tracking entry - toggleable (writes the plugin toggle file)
+  items.push({
+    id: 'wakatime-session',
+    name: 'WakaTime Session Track',
+    file: 'WAKA-SESSION',
+    target: WAKA_SESSION_TOGGLE,
+    dir: 'VIRTUAL',
+    type: 'toggle',
+    icon: '⏱️',
+    description: 'Session heartbeats (PC + phone) — flips wakatime-session.enabled.json',
+  });
+
+  // virtual WakaTime watcher process - start/stop the background heartbeat loop
+  items.push({
+    id: 'wakatime-session-watch',
+    name: 'WakaTime Session Watch',
+    file: 'WAKA-SESSION-WATCH',
+    target: path.join(CONTROL_SCRIPTS_ROOT, 'WakaTimeSessionWatch.ps1'),
+    dir: 'VIRTUAL',
+    type: 'toggle',
+    icon: '🔄',
+    description: 'Background heartbeat watcher (1/min) — lock .wakatime-session-watch.lock',
+  });
+
   const scanDir = (dir, sub) => {
     if (!fs.existsSync(dir)) return;
     const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -105,6 +166,7 @@ function scanControls() {
         if (lower.includes('blender local')) { type = 'toggle'; icon = '🟦'; description = 'WakaTime helper — lock .blender-helper-local.lock'; }
         else if (lower.includes('blender server')) { type = 'toggle'; icon = '🟦'; description = 'WakaTime helper — lock .blender-helper.lock (server)'; }
         else if (lower.includes('houdini')) { type = 'toggle'; icon = '🟧'; description = 'WakaTime helper — lock .houdini-helper-local.lock'; }
+        else if (lower.includes('after effects') || lower.includes('afterfx')) { type = 'toggle'; icon = '🟪'; description = 'WakaTime helper — lock .afterfx-helper-local.lock (idle heartbeats when AE closed)'; }
         else if (lower.includes('mcp orphan')) { type = 'run'; icon = '🧹'; description = 'Only when OpenChamber closed — PID-targeted cleanup'; }
         else if (lower.includes('vault reindex')) { type = 'run'; icon = '📚'; description = 'RAG reindex.bat'; }
         else if (lower.includes('helper') || lower.includes('dashboard')) { type = 'run'; icon = '📊'; description = 'Status dashboard window'; }
@@ -135,21 +197,27 @@ app.get('/api/items', (req, res) => {
 
 // API: status of all toggles
 app.get('/api/status', async (req, res) => {
-  const [oc, blLocal, blServer, houdini, mcp, studio] = await Promise.all([
+  const [oc, blLocal, blServer, houdini, aeLocal, mcp, studio, review] = await Promise.all([
     getOpenChamberStatus(),
     getHelperStatus('.blender-helper-local.lock'),
     getHelperStatus('.blender-helper.lock'),
     getHelperStatus('.houdini-helper-local.lock'),
+    getHelperStatus('.afterfx-helper-local.lock'),
     getMcpOrphanStatus(),
     getStudioStatus(),
+    getReviewStatus(),
   ]);
   res.json({
     'openchamber-server': oc,
     'Blender_Local_Control': blLocal,
     'Blender_Server_Control': blServer,
     'Houdini_Control': houdini,
+    'After_Effects_Control': aeLocal,
     mcpOrphan: mcp,
     'studio-server': studio,
+    'review-server': review,
+    'wakatime-session': getWakaSessionStatus(),
+    'wakatime-session-watch': await getHelperStatus('.wakatime-session-watch.lock'),
   });
 });
 
@@ -212,6 +280,44 @@ app.post('/api/toggle', async (req, res) => {
         return res.json({ action: 'start', before: st, after, ok: after.alive });
       }
     }
+    if (id === 'review-server') {
+      const st = await getReviewStatus();
+      if (st.alive) {
+        // STOP - helper is PID-targeted internally, then verify port released
+        const { stdout } = await execPs(`powershell -NoProfile -ExecutionPolicy Bypass -File '${REVIEW_HELPER}' -Stop`);
+        await new Promise(r => setTimeout(r, 1200));
+        const after = await getReviewStatus();
+        return res.json({ action: 'stop', before: st, after, ok: !after.alive, raw: stdout });
+      } else {
+        // START - helper spawns node hidden, then verify port listening
+        await startHelper(REVIEW_HELPER);
+        await new Promise(r => setTimeout(r, 2500));
+        const after = await getReviewStatus();
+        return res.json({ action: 'start', before: st, after, ok: after.alive });
+      }
+    }
+    if (id === 'wakatime-session') {
+      const before = getWakaSessionStatus();
+      const afterEnabled = !before.enabled;
+      setWakaSessionEnabled(afterEnabled);
+      const after = getWakaSessionStatus();
+      return res.json({ action: afterEnabled ? 'start' : 'stop', before, after, ok: after.enabled === afterEnabled });
+    }
+    if (id === 'wakatime-session-watch') {
+      const st = await getHelperStatus('.wakatime-session-watch.lock');
+      if (st.alive) {
+        const r = await stopHelper('.wakatime-session-watch.lock');
+        await new Promise(r => setTimeout(r, 800));
+        const after = await getHelperStatus('.wakatime-session-watch.lock');
+        return res.json({ action: 'stop', before: st, after, ok: !after.alive, raw: r.stdout });
+      } else {
+        const helper = path.join(CONTROL_SCRIPTS_ROOT, 'WakaTimeSessionWatch.ps1');
+        await startHelper(helper);
+        await new Promise(r => setTimeout(r, 3000));
+        const after = await getHelperStatus('.wakatime-session-watch.lock');
+        return res.json({ action: 'start', before: st, after, ok: after.alive });
+      }
+    }
     if (id === 'Blender_Local_Control') {
       const st = await getHelperStatus('.blender-helper-local.lock');
       if (st.alive) {
@@ -257,6 +363,21 @@ app.post('/api/toggle', async (req, res) => {
         return res.json({ action: 'start', before: st, after, ok: after.alive });
       }
     }
+    if (id === 'After_Effects_Control') {
+      const st = await getHelperStatus('.afterfx-helper-local.lock');
+      if (st.alive) {
+        const r = await stopHelper('.afterfx-helper-local.lock');
+        await new Promise(r => setTimeout(r, 800));
+        const after = await getHelperStatus('.afterfx-helper-local.lock');
+        return res.json({ action: 'stop', before: st, after, ok: !after.alive, raw: r.stdout });
+      } else {
+        const helper = path.join(CONTROL_SCRIPTS_ROOT, 'AfterEffectsHelper-Local.ps1');
+        await startHelper(helper);
+        await new Promise(r => setTimeout(r, 3000));
+        const after = await getHelperStatus('.afterfx-helper-local.lock');
+        return res.json({ action: 'start', before: st, after, ok: after.alive });
+      }
+    }
     return res.status(400).json({ error: 'unknown toggle id: ' + id });
   } catch (e) {
     res.status(500).json({ error: String(e) });
@@ -290,18 +411,20 @@ async function runHelperDashboard() {
 
 // Structured dashboard for in-app rendering (no colors, JSON)
 async function getDashboardJson() {
-  const [blLocal, blServer, houdiniLocal, houdiniServer, localBlender, localHoudini, mcp] = await Promise.all([
+  const [blLocal, blServer, houdiniLocal, houdiniServer, aeLocal, localBlender, localHoudini, localAE, mcp] = await Promise.all([
     getHelperStatus('.blender-helper-local.lock'),
     getHelperStatus('.blender-helper.lock'),
     getHelperStatus('.houdini-helper-local.lock'),
     getHelperStatus('.houdini-helper.lock'),
+    getHelperStatus('.afterfx-helper-local.lock'),
     execPs(`$p = Get-Process -Name blender -ErrorAction SilentlyContinue | Select-Object -First 1; if($p){ $t=$p.MainWindowTitle; Write-Output "ALIVE:$($p.Id):$t" } else { Write-Output 'DEAD' }`),
     execPs(`$p = Get-Process -Name houdini -ErrorAction SilentlyContinue | Select-Object -First 1; if(-not $p){ $p = Get-Process -Name hython -ErrorAction SilentlyContinue | Select-Object -First 1 }; if($p){ Write-Output "ALIVE:$($p.Id)" } else { Write-Output 'DEAD' }`),
+    execPs(`$p = Get-Process -Name AfterFX -ErrorAction SilentlyContinue | Select-Object -First 1; if($p){ Write-Output "ALIVE:$($p.Id):$($p.MainWindowTitle)" } else { Write-Output 'DEAD' }`),
     getMcpOrphanStatus(),
   ]);
   return {
-    helpers: { blLocal, blServer, houdiniLocal, houdiniServer },
-    localApps: { blender: localBlender.stdout, houdini: localHoudini.stdout },
+    helpers: { blLocal, blServer, houdiniLocal, houdiniServer, aeLocal },
+    localApps: { blender: localBlender.stdout, houdini: localHoudini.stdout, afterfx: localAE.stdout },
     mcp,
     time: new Date().toISOString(),
   };
@@ -368,4 +491,9 @@ const TAILSCALE_IP = '100.92.107.30';
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Controls launcher on http://localhost:${PORT} and http://${TAILSCALE_IP}:${PORT}`);
   console.log(`Serving ${CONTROLS_DIR}`);
+  // Auto-start the K3 review API (:8901) on boot so card review buttons are
+  // never left "review server offline". Idempotent: helper exits if already up.
+  getReviewStatus()
+    .then(st => st.alive ? null : startHelper(REVIEW_HELPER))
+    .catch(() => {});
 });

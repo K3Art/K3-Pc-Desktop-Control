@@ -35,7 +35,13 @@ function statusFor(item) {
   if (item.id === 'Blender_Local_Control') return status['Blender_Local_Control'];
   if (item.id === 'Blender_Server_Control') return status['Blender_Server_Control'];
   if (item.id === 'Houdini_Control') return status['Houdini_Control'];
-  if (item.id === 'studio-server') return status['studio-server'];
+  if (item.id === 'After_Effects_Control') return status['After_Effects_Control'];
+  if (item.id === 'review-server') return status['review-server'];
+  if (item.id === 'wakatime-tracking') {
+    const tracking = status['wakatime-session'];
+    const watcher = status['wakatime-session-watch'];
+    return { alive: tracking?.enabled !== false && !!watcher?.alive, pid: watcher?.pid };
+  }
   if (item.id === 'MCP_Orphan_Cleanup') return status.mcpOrphan;
   return null;
 }
@@ -102,7 +108,7 @@ function paint() {
         sw.setAttribute('aria-checked', String(alive));
       }
       const state = el.querySelector('.state');
-      if (state) state.textContent = alive ? 'RUNNING' + (st.pid ? ' · PID ' + st.pid : '') : 'STOPPED';
+      if (state) state.textContent = it.id === 'wakatime-tracking' ? (alive ? 'ON' : 'OFF') : alive ? 'RUNNING' + (st.pid ? ' · PID ' + st.pid : '') : 'STOPPED';
     } else {
       const blocked = it.id === 'MCP_Orphan_Cleanup' && status.mcpOrphan && !status.mcpOrphan.canClean;
       el.classList.toggle('blocked', !!blocked);
@@ -117,7 +123,8 @@ function paint() {
 async function load() {
   try {
     const [itRes, stRes] = await Promise.all([fetch('/api/items'), fetch('/api/status')]);
-    items = await itRes.json();
+    items = (await itRes.json()).filter(item => !['studio-server', 'wakatime-session', 'wakatime-session-watch', 'WakaTime_Mobile_Control'].includes(item.id));
+    items.push({ id: 'wakatime-tracking', name: 'WakaTime Tracking', type: 'toggle', icon: '⌚', description: 'One switch for session tracking and the PC + phone heartbeat watcher.' });
     status = await stRes.json();
     const sig = items.map(i => i.id).join('|');
     if (!built || sig !== signature) {
@@ -132,17 +139,42 @@ async function load() {
   }
 }
 
+async function setWakatimeTracking(enabled) {
+  const trackingEnabled = status['wakatime-session']?.enabled !== false;
+  const watcherRunning = !!status['wakatime-session-watch']?.alive;
+  const steps = enabled
+    ? [!trackingEnabled ? 'wakatime-session' : null, !watcherRunning ? 'wakatime-session-watch' : null]
+    : [watcherRunning ? 'wakatime-session-watch' : null, trackingEnabled ? 'wakatime-session' : null];
+
+  for (const id of steps) {
+    if (!id) continue;
+    const response = await fetch('/api/toggle', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    });
+    const result = await response.json();
+    if (!response.ok || result.error || !result.ok) throw new Error(result.error || 'Could not update ' + id);
+  }
+}
+
 async function doToggle(it, card) {
   card.style.opacity = '.55';
   try {
-    const r = await fetch('/api/toggle', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: it.id }),
-    });
-    const j = await r.json();
-    if (j.error) showToast(j.error, false);
-    else showToast(`${it.name}: ${String(j.action).toUpperCase()} ${j.ok ? '✓' : '⚠ check'}`, j.ok);
+    if (it.id === 'wakatime-tracking') {
+      const currentlyOn = status['wakatime-session']?.enabled !== false && !!status['wakatime-session-watch']?.alive;
+      await setWakatimeTracking(!currentlyOn);
+      showToast('WakaTime Tracking: ' + (!currentlyOn ? 'ON' : 'OFF'));
+    } else {
+      const r = await fetch('/api/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id: it.id }),
+      });
+      const j = await r.json();
+      if (j.error) showToast(j.error, false);
+      else showToast(`${it.name}: ${String(j.action).toUpperCase()} ${j.ok ? '✓' : '⚠ check'}`, j.ok);
+    }
   } catch (e) {
     showToast(String(e), false);
   }
@@ -164,14 +196,17 @@ function renderDashboard(d) {
   const row = (label, st) => `<div class="dashRow"><span><span class="dot ${st?.alive ? 'on' : 'off'}"></span>${label}</span><b style="color:${st?.alive ? 'var(--alive)' : 'var(--dead)'}">${st?.alive ? 'ALIVE · PID ' + st.pid : 'DEAD'}</b></div>`;
   const lb = d.localApps?.blender || 'DEAD';
   const lh = d.localApps?.houdini || 'DEAD';
+  const lae = d.localApps?.afterfx || 'DEAD';
   const mcp = d.mcp ? `${d.mcp.sessions} session(s) — ${d.mcp.canClean ? 'can clean' : 'blocked (close OpenChamber)'}` : '';
   let html = '<div class="dashGrid">';
   html += row('Blender Local', h.blLocal);
   html += row('Blender Server', h.blServer);
   html += row('Houdini Local', h.houdiniLocal);
   html += row('Houdini Server', h.houdiniServer);
+  html += row('AfterFX Local', h.aeLocal);
   html += `<div class="dashRow"><span>Blender App</span><b style="color:var(--dim)">${lb.startsWith('ALIVE') ? lb : 'not running'}</b></div>`;
   html += `<div class="dashRow"><span>Houdini App</span><b style="color:var(--dim)">${lh.startsWith('ALIVE') ? lh : 'not running'}</b></div>`;
+  html += `<div class="dashRow"><span>AfterFX App</span><b style="color:var(--dim)">${lae.startsWith('ALIVE') ? lae : 'not running (idle heartbeats)'}</b></div>`;
   html += `<div class="dashRow"><span>MCP</span><b style="color:var(--dim)">${mcp}</b></div>`;
   html += '</div>';
   return html;
