@@ -15,6 +15,9 @@ const STUDIO_PORT = 8790;
 const REVIEW_HELPER = path.join(CONTROL_SCRIPTS_ROOT, 'K3-Review-Server.ps1');
 const REVIEW_PORT = 8901;
 const WAKA_SESSION_TOGGLE = path.join(process.env.USERPROFILE || process.env.HOME || '~', '.config', 'opencode', 'wakatime-session.enabled.json');
+const ASSISTANT_STATUS_FILE = 'D:\\Nextcloud\\_AI_SYSTEMS\\_OPENCLAW\\STATUS.json';
+const ASSISTANT_LAUNCHER = 'E:\\Git\\AI_SYSTEMS\\K3-OpenClaw-Assistant\\Start-PersonalAssistant.ps1';
+const ASSISTANT_TASK = 'OpenClaw-Personal-Assistant';
 
 function getWakaSessionStatus() {
   try {
@@ -87,6 +90,24 @@ async function getReviewStatus() {
   return { alive: false, pid: null };
 }
 
+// The assistant is up when its loopback bridge answers and the logon supervisor
+// is looping. The -Command filter is required: the probe itself is a powershell
+// -Command process whose command line contains the supervisor script name.
+async function getAssistantStatus() {
+  let state = 'unknown';
+  let checkedAt = null;
+  try {
+    const j = JSON.parse(fs.readFileSync(ASSISTANT_STATUS_FILE, 'utf8'));
+    state = j.state || 'unknown';
+    checkedAt = j.checkedAt || null;
+  } catch {}
+  const cmd = `$b = @(Get-NetTCPConnection -LocalPort 18790 -State Listen -ErrorAction SilentlyContinue) | Select-Object -First 1; $s = @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'powershell.exe' -and $_.CommandLine -like '*-File*Run-AssistantSupervisor.ps1*' -and $_.CommandLine -notlike '*-Command*' }); Write-Output ('BRIDGE:' + $(if($b){$b.OwningProcess}else{0}) + ';SUP:' + $s.Count)`;
+  const { stdout } = await execPs(cmd);
+  const bridge = parseInt((stdout.match(/BRIDGE:(\d+)/) || [])[1] || '0', 10);
+  const supervisors = parseInt((stdout.match(/SUP:(\d+)/) || [])[1] || '0', 10);
+  return { alive: bridge > 0 && supervisors > 0, pid: bridge || null, supervisors, state, checkedAt };
+}
+
 function scanControls() {
   const items = [];
   // virtual OpenChamber Server entry - always first, toggleable
@@ -99,6 +120,18 @@ function scanControls() {
     type: 'toggle',
     icon: '🟣',
     description: 'Web UI on :3000 — real ON/OFF via port check, not just .lnk',
+  });
+
+  // virtual OpenClaw personal assistant entry - bridge + logon supervisor
+  items.push({
+    id: 'openclaw-assistant',
+    name: 'OpenClaw Personal Assistant',
+    file: 'OpenClaw Personal Assistant',
+    target: 'SCHEDULED-TASK:' + ASSISTANT_TASK,
+    dir: 'VIRTUAL',
+    type: 'toggle',
+    icon: 'AI',
+    description: 'PC-hosted assistant - bridge on :18790 with logon supervisor. Toggle pauses or resumes it.',
   });
 
   // virtual K3 Concept Studio entry - always a toggle, port-checked on :8790
@@ -216,6 +249,7 @@ app.get('/api/status', async (req, res) => {
     mcpOrphan: mcp,
     'studio-server': studio,
     'review-server': review,
+    'openclaw-assistant': await getAssistantStatus(),
     'wakatime-session': getWakaSessionStatus(),
     'wakatime-session-watch': await getHelperStatus('.wakatime-session-watch.lock'),
   });
@@ -263,6 +297,26 @@ app.post('/api/toggle', async (req, res) => {
         const after = await getOpenChamberStatus();
         return res.json({ action: 'start', before: st, after, ok: after.alive });
       }
+    }
+    if (id === 'openclaw-assistant') {
+      const st = await getAssistantStatus();
+      const local = path.join(process.env.LOCALAPPDATA || '', 'OpenClawPersonal');
+      fs.mkdirSync(local, { recursive: true });
+      if (st.alive) {
+        // Operator pause: the launcher sets the pause flag and stops the owned
+        // bridge and gateway by exact PID; the supervisor then exits by itself.
+        const { stdout } = await execPs(`powershell -NoProfile -ExecutionPolicy Bypass -File '${ASSISTANT_LAUNCHER}' -Stop`);
+        await new Promise(r => setTimeout(r, 2500));
+        const after = await getAssistantStatus();
+        return res.json({ action: 'stop', before: st, after, ok: !after.alive, raw: stdout });
+      }
+      // Resume: clear the operator pause flag, then let the logon supervisor
+      // rebuild the bridge. Startup takes about two minutes and is not awaited.
+      fs.writeFileSync(path.join(local, 'control.json'), JSON.stringify({ paused: false }), 'utf8');
+      await execPs(`Start-ScheduledTask -TaskName '${ASSISTANT_TASK}'; Write-Output 'started'`);
+      await new Promise(r => setTimeout(r, 4000));
+      const after = await getAssistantStatus();
+      return res.json({ action: 'start', before: st, after, ok: true, note: 'Supervisor rebuilds the bridge within about two minutes.' });
     }
     if (id === 'studio-server') {
       const st = await getStudioStatus();

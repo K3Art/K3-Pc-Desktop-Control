@@ -43,6 +43,7 @@ function statusFor(item) {
     return { alive: tracking?.enabled !== false && !!watcher?.alive, pid: watcher?.pid };
   }
   if (item.id === 'MCP_Orphan_Cleanup') return status.mcpOrphan;
+  if (item.id === 'openclaw-assistant') return status['openclaw-assistant'];
   return null;
 }
 
