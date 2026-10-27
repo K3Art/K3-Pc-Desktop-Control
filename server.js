@@ -284,17 +284,27 @@ app.post('/api/toggle', async (req, res) => {
     if (id === 'openchamber-server') {
       const st = await getOpenChamberStatus();
       if (st.alive) {
-        // STOP - PID-targeted via openchamber stop, wait 5s, verify port dead
-        await execPs(`cmd /c openchamber stop`);
-        // wait a bit
-        await new Promise(r => setTimeout(r, 2000));
-        const after = await getOpenChamberStatus();
-        return res.json({ action: 'stop', before: st, after, ok: !after.alive });
+        // STOP via openchamber CLI, then poll up to ~12s for port release.
+        // (Graceful shutdown alone can take ~5s, so a fixed 2s wait
+        // re-checks too early and reports failure while stopping.)
+        const stopRes = await execPs(`cmd /c openchamber stop`);
+        let after = await getOpenChamberStatus();
+        const deadline = Date.now() + 12000;
+        while (after.alive && Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, 1000));
+          after = await getOpenChamberStatus();
+        }
+        const raw = ((stopRes.stdout || '') + '\n' + (stopRes.stderr || '')).trim();
+        return res.json({ action: 'stop', before: st, after, ok: !after.alive, raw });
       } else {
-        // START - hidden cmd
+        // START - hidden cmd, then poll up to ~12s for port to come up
         exec(`cmd /c openchamber --lan --port 3000 --ui-password korakot1179`, { windowsHide: true });
-        await new Promise(r => setTimeout(r, 2500));
-        const after = await getOpenChamberStatus();
+        let after = await getOpenChamberStatus();
+        const deadline = Date.now() + 12000;
+        while (!after.alive && Date.now() < deadline) {
+          await new Promise(r => setTimeout(r, 1000));
+          after = await getOpenChamberStatus();
+        }
         return res.json({ action: 'start', before: st, after, ok: after.alive });
       }
     }

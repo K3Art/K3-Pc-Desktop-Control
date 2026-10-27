@@ -27,6 +27,6 @@ node server.js
 
 ## Review server (:8901)
 
-The K3 AI Workspace review API — `E:\Git\K3-AI-Workspace\workspace\_shared\k3-review-server.mjs`.
+The K3 AI Workspace review API — `E:\Git\AI_SYSTEMS\K3-AI-Workspace-Master\K3-AI-Workspace\workspace\_shared\k3-review-server.mjs`.
 Helper: `D:\Nextcloud\_AI_SYSTEMS\tools\_Control\K3-Review-Server.ps1` (`-Stop`, `-Status`).
 Auto-start: scheduled task **K3-Review-Server** (`wscript` → `K3-Review-Server.vbs` → helper) at logon, plus an idempotent ensure on launcher boot.
