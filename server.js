@@ -1,13 +1,16 @@
 import express from 'express';
-import cors from 'cors';
 import fs from 'fs';
 import path from 'path';
-import { exec, spawn } from 'child_process';
+import { exec, spawn, spawnSync } from 'child_process';
 import { fileURLToPath } from 'url';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { createDeviceAccess } from './device-access.mjs';
+import { startProtectedOpenChamber } from './openchamber-launch.mjs';
+import { passwordAccess } from './password-access.mjs';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
-const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3157;
+const PORT = process.env.PORT === undefined ? 3157 : parseInt(process.env.PORT, 10);
 const CONTROLS_DIR = 'C:\\Users\\Kim\\Desktop\\Controls';
 const CONTROL_SCRIPTS_ROOT = 'D:\\Nextcloud\\_AI_SYSTEMS\\tools\\_Control';
 const STUDIO_HELPER = path.join(CONTROL_SCRIPTS_ROOT, 'K3-Concept-Studio.ps1');
@@ -18,6 +21,9 @@ const WAKA_SESSION_TOGGLE = path.join(process.env.USERPROFILE || process.env.HOM
 const ASSISTANT_STATUS_FILE = 'D:\\Nextcloud\\_AI_SYSTEMS\\_OPENCLAW\\STATUS.json';
 const ASSISTANT_LAUNCHER = 'E:\\Git\\AI_SYSTEMS\\K3-OpenClaw-Assistant\\Start-PersonalAssistant.ps1';
 const ASSISTANT_TASK = 'OpenClaw-Personal-Assistant';
+const HIVE_SERVER = 'E:\\Git\\AI_SYSTEMS\\K3-OpenCode-Hive\\packages\\app\\server.mjs';
+const HIVE_CONNECTION = 'E:\\Git\\AI_SYSTEMS\\K3-OpenCode-Hive\\.local\\openchamber-connection.json';
+const HIVE_NODE = 'C:\\Program Files\\nodejs\\node.exe';
 
 function getWakaSessionStatus() {
   try {
@@ -32,8 +38,66 @@ function setWakaSessionEnabled(enabled) {
   fs.writeFileSync(WAKA_SESSION_TOGGLE, JSON.stringify({ enabled }, null, 2) + '\n', 'utf8');
 }
 
-app.use(cors());
-app.use(express.json());
+const PUBLIC_ORIGIN = 'https://kimpc.tail91f061.ts.net:8444';
+const PUBLIC_HOST = new URL(PUBLIC_ORIGIN).host;
+let LOCAL_HOST = `127.0.0.1:${PORT}`;
+const passwordMode=process.env.K3_CONTROLS_TESTING!=='1'||Boolean(process.env.K3_CONTROLS_PASSWORD_FILE);
+const access = passwordMode?passwordAccess({file:process.env.K3_CONTROLS_PASSWORD_FILE||path.join(process.env.LOCALAPPDATA,'K3Controls','password-auth.json'),origin:PUBLIC_ORIGIN}):createDeviceAccess();
+const localSecret = randomBytes(32).toString('hex');
+const powershellExe = path.join(process.env.SystemRoot, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+const localKeyPath = process.env.K3_CONTROLS_TEST_KEY || path.join(process.env.LOCALAPPDATA, 'K3Controls', 'pairing-key.txt');
+fs.mkdirSync(path.dirname(localKeyPath), { recursive: true });
+// DPAPI encrypts the local issuance key to the current Windows account.
+const encrypted = spawnSync(powershellExe, ['-NoProfile', '-NonInteractive', '-Command', '$v=[Console]::In.ReadToEnd(); ConvertFrom-SecureString (ConvertTo-SecureString $v -AsPlainText -Force)'], { input: localSecret, encoding: 'utf8', timeout: 10000 });
+if (encrypted.status !== 0 || !encrypted.stdout.trim()) throw new Error('Cannot protect local pairing key; refusing to start.');
+fs.writeFileSync(localKeyPath, encrypted.stdout.trim(), 'utf8');
+const equalSecret = (a, b) => typeof a === 'string' && Buffer.byteLength(a) === Buffer.byteLength(b) && timingSafeEqual(Buffer.from(a), Buffer.from(b));
+app.disable('x-powered-by');
+app.use(express.json({ limit: '16kb' }));
+app.use(async (req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('Content-Security-Policy', "frame-ancestors 'none'; base-uri 'none'; form-action 'self'");
+  const host = req.headers.host;
+  if (host !== PUBLIC_HOST && host !== LOCAL_HOST) return res.status(403).json({ error: 'Host not allowed' });
+  if (req.path === '/api/local/pair-code' && req.method === 'POST') {
+    if(passwordMode)return res.status(410).json({error:'Pairing has been replaced by password sign-in.'});
+    if (host !== LOCAL_HOST || req.headers.origin || !equalSecret(req.headers['x-controls-local-key'], localSecret)) return res.status(403).json({ error: 'Not allowed' });
+    return res.json({ code: access.issueCode() });
+  }
+  // Loopback is only for the local code helper, never an authentication bypass.
+  if (host !== PUBLIC_HOST) return res.status(403).json({ error: 'Use the private HTTPS address' });
+  if (req.headers.forwarded || (req.headers['x-forwarded-host'] && req.headers['x-forwarded-host'] !== PUBLIC_HOST) || (req.headers['x-forwarded-proto'] && req.headers['x-forwarded-proto'] !== 'https')) return res.status(403).json({ error: 'Forwarded authority not allowed' });
+  if(req.path==='/api/login'&&req.method==='POST'){
+    if(!passwordMode||req.headers.origin!==PUBLIC_ORIGIN||!req.is('application/json'))return res.status(403).json({error:'Origin not allowed'});
+    try {
+      const result=await access.login(req.body?.password,'Controls browser',req.body?.remember);
+      if(result.error)return res.status(result.status).json({error:result.error});
+      res.setHeader('Set-Cookie',`__Host-k3controls=${result.token}; Path=/; HttpOnly; Secure; SameSite=Strict`+(req.body.remember===true?`; Max-Age=${result.maxAge}`:''));
+      return res.json({ok:true});
+    }catch{return res.status(503).json({error:'Sign-in could not be completed. Try again later.'});}
+  }
+  if (req.path === '/api/pair' && req.method === 'POST') {
+    if(passwordMode)return res.status(410).json({error:'Use password sign-in.'});
+    if (req.headers.origin !== PUBLIC_ORIGIN || !req.is('application/json')) return res.status(403).json({ error: 'Origin not allowed' });
+    const paired = access.pair(req.body?.code);
+    if (!paired) return res.status(401).json({ error: 'Code invalid, expired or used. Generate a new code on the PC.' });
+    res.setHeader('Set-Cookie', `__Host-k3controls=${paired.token}; Path=/; HttpOnly; Secure; SameSite=Strict`);
+    return res.json({ ok: true });
+  }
+  const token = req.headers.cookie?.split(';').map(s => s.trim()).find(s => s.startsWith('__Host-k3controls='))?.slice('__Host-k3controls='.length);
+  const session = access.authenticate(token);
+  if (!session) {
+    if (req.method === 'GET' && ['/', '/pair.js','/login.js'].includes(req.path)) return res.sendFile(path.join(__dirname, 'public', passwordMode?(req.path==='/'?'login.html':'login.js'):(req.path==='/'?'pair.html':'pair.js')));
+    return res.status(401).json({ error: 'Sign in first' });
+  }
+  const csrf=session.csrfToken||session.csrf;
+  if (req.path === '/api/session' && req.method === 'GET') return res.json({ csrf });
+  if (!['GET', 'HEAD'].includes(req.method) && (req.headers.origin !== PUBLIC_ORIGIN || !equalSecret(req.headers['x-controls-csrf'], csrf) || !req.is('application/json'))) return res.status(403).json({ error: 'Invalid origin or session' });
+  if(passwordMode&&req.path==='/api/logout'&&req.method==='POST'){access.revoke(session.id);res.setHeader('Set-Cookie','__Host-k3controls=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0');return res.json({ok:true});}
+  next();
+});
 app.use(express.static(path.join(__dirname, 'public')));
 
 function execPs(cmd) {
@@ -90,6 +154,14 @@ async function getReviewStatus() {
   return { alive: false, pid: null };
 }
 
+async function getHiveStatus() {
+  const cmd = `$c = Get-NetTCPConnection -LocalPort 8912 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if(-not $c){Write-Output 'OFF'} else { $p = Get-CimInstance Win32_Process -Filter ('ProcessId=' + $c.OwningProcess); if($p.Name -eq 'node.exe' -and $p.CommandLine -like '*K3-OpenCode-Hive*packages*app*server.mjs*' -and $p.CommandLine -like '*--public-origin*kimpc.tail91f061.ts.net:8443*'){Write-Output ('ON:' + $c.OwningProcess)} else {Write-Output 'BLOCKED'} }`;
+  const { stdout, err } = await execPs(cmd);
+  if (err) return { alive: false, blocked: true };
+  if (/^ON:\d+$/.test(stdout)) return { alive: true, pid: Number(stdout.slice(3)), blocked: false };
+  return { alive: false, blocked: stdout !== 'OFF' };
+}
+
 // The assistant is up when its loopback bridge answers and the logon supervisor
 // is looping. The -Command filter is required: the probe itself is a powershell
 // -Command process whose command line contains the supervisor script name.
@@ -110,6 +182,7 @@ async function getAssistantStatus() {
 
 function scanControls() {
   const items = [];
+    items.push({ id: 'hive-mobile', name: 'K3 Hive Server', file: 'Hive Mobile', dir: 'VIRTUAL', type: 'toggle', icon: 'H', description: 'Runs in the background. Stopping signs out paired devices and can interrupt active work.' });
   // virtual OpenChamber Server entry - always first, toggleable
   items.push({
     id: 'openchamber-server',
@@ -250,6 +323,7 @@ app.get('/api/status', async (req, res) => {
     'studio-server': studio,
     'review-server': review,
     'openclaw-assistant': await getAssistantStatus(),
+    'hive-mobile': await getHiveStatus(),
     'wakatime-session': getWakaSessionStatus(),
     'wakatime-session-watch': await getHelperStatus('.wakatime-session-watch.lock'),
   });
@@ -277,10 +351,33 @@ async function stopHelper(lockName) {
   return execPs(ps);
 }
 
+let hiveToggleBusy = false;
 // Toggle endpoint
 app.post('/api/toggle', async (req, res) => {
   const { id } = req.body;
   try {
+    if (id === 'hive-mobile') {
+      if (hiveToggleBusy) return res.status(409).json({ error: 'Hive is already changing state.' });
+      hiveToggleBusy = true;
+      try {
+      const before = await getHiveStatus();
+      if (before.blocked) return res.status(409).json({ error: 'Hive port is in use by an unverified process.' });
+      if (before.alive) {
+        const recheck = await getHiveStatus();
+        if (!recheck.alive || recheck.pid !== before.pid) return res.status(409).json({ error: 'Hive status changed; retry.' });
+        const stopped = await execPs(`$c=Get-NetTCPConnection -LocalPort 8912 -State Listen -ErrorAction Stop | Select-Object -First 1; $p=Get-CimInstance Win32_Process -Filter ('ProcessId=' + $c.OwningProcess); if($c.OwningProcess -ne ${before.pid} -or $p.Name -ne 'node.exe' -or $p.CommandLine -notlike '*K3-OpenCode-Hive*packages*app*server.mjs*' -or $p.CommandLine -notlike '*--public-origin*kimpc.tail91f061.ts.net:8443*'){throw 'Hive ownership changed'}; Stop-Process -Id ${before.pid} -ErrorAction Stop`);
+        if (stopped.err) return res.status(500).json({ error: 'Could not safely stop Hive.' });
+      } else {
+        if (!fs.existsSync(HIVE_SERVER) || !fs.existsSync(HIVE_CONNECTION) || !fs.existsSync(HIVE_NODE) || !fs.statSync(HIVE_NODE).size) return res.status(500).json({ error: 'Hive server, connection or Node is missing.' });
+        const launch = await execPs(`Start-Process -FilePath '${HIVE_NODE}' -WindowStyle Hidden -ArgumentList '${HIVE_SERVER}','--connection','${HIVE_CONNECTION}','--port','8912','--public-origin','https://kimpc.tail91f061.ts.net:8443','--background-control'`);
+        if (launch.err) return res.status(500).json({ error: 'Could not start Hive.' });
+      }
+      let after = await getHiveStatus();
+      const deadline = Date.now() + 12000;
+      while (!after.blocked && after.alive === before.alive && Date.now() < deadline) { await new Promise(r => setTimeout(r, 500)); after = await getHiveStatus(); }
+      return res.json({ action: before.alive ? 'stop' : 'start', before, after, ok: !after.blocked && after.alive !== before.alive });
+      } finally { hiveToggleBusy = false; }
+    }
     if (id === 'openchamber-server') {
       const st = await getOpenChamberStatus();
       if (st.alive) {
@@ -298,7 +395,8 @@ app.post('/api/toggle', async (req, res) => {
         return res.json({ action: 'stop', before: st, after, ok: !after.alive, raw });
       } else {
         // START - hidden cmd, then poll up to ~12s for port to come up
-        exec(`cmd /c openchamber --lan --port 3000 --ui-password korakot1179`, { windowsHide: true });
+        try { await startProtectedOpenChamber(); }
+        catch { return res.status(503).json({ error: 'Protected OpenChamber credential is not configured. Launch from its trusted local launcher.' }); }
         let after = await getOpenChamberStatus();
         const deadline = Date.now() + 12000;
         while (!after.alive && Date.now() < deadline) {
@@ -552,7 +650,9 @@ app.post('/api/run', async (req, res) => {
 app.get('/api/health', (req, res) => res.json({ ok: true, controlsDir: CONTROLS_DIR }));
 
 const TAILSCALE_IP = '100.92.107.30';
-app.listen(PORT, '0.0.0.0', () => {
+const listener = app.listen(PORT, '127.0.0.1', () => {
+  LOCAL_HOST = `127.0.0.1:${listener.address().port}`;
+  if (process.env.K3_CONTROLS_TESTING === '1') { console.log(`TEST_READY:${listener.address().port}`); return; }
   console.log(`Controls launcher on http://localhost:${PORT} and http://${TAILSCALE_IP}:${PORT}`);
   console.log(`Serving ${CONTROLS_DIR}`);
   // Auto-start the K3 review API (:8901) on boot so card review buttons are

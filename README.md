@@ -2,8 +2,19 @@
 
 Mobile web panel for `C:\Users\Kim\Desktop\Controls` (8 shortcuts + GIT_P4_Link). Tap to RUN or TOGGLE.
 
-**URL (phone on Tailscale):** `http://100.92.107.30:3157`  
-**Local:** `http://127.0.0.1:3157`
+**Private URL (phone or PC on Tailscale):** `https://kimpc.tail91f061.ts.net:8444`  
+The old network HTTP address is disabled. The backend listens only on `127.0.0.1:3157` and requires pairing even on loopback.
+
+## Pair a device
+
+**Replaced by password sign-in (27 Oct 2026).** Open `Desktop\Controls\Set Controls Password.cmd` locally, or `Set Hive and Controls Passwords.cmd` to configure both services. Then sign in at the private HTTPS address. Select **Remember this device for 30 days** for a persistent secure session; the password is not stored by the web app in the browser. Without it, sign-ins last eight hours with a browser-session cookie. Remembered sessions survive restarts; changing the password revokes them. Use **Sign out** to revoke this browser. Ten sign-in attempts per 15 minutes are allowed service-wide. Old code issuance/pair endpoints are disabled in production password mode. The following pairing steps are historical, not current instructions.
+
+1. On the PC, open `Desktop\Controls\Pair K3 Controls.cmd`.
+2. Enter the one-use code on the HTTPS pairing screen within five minutes. Eight incorrect attempts exhaust the code; run the command again for a new one.
+3. Sessions expire after eight hours; restarting the dashboard revokes all sessions. Pair again when prompted. The local pairing helper's key is Windows-user-protected and the pairing code is never sent to the dashboard logs.
+4. The Hive Mobile switch starts or stops the existing Hive mobile service in the background; no console must remain open. Stopping signs out Hive devices and can interrupt active work. Hive's own pairing is separate: when needed, open `Desktop\Controls\Pair Hive Mobile.cmd` briefly to get its one-time code.
+
+The dashboard's HTTPS proxy is Tailscale Serve `:8444` → loopback `:3157`. Existing Workspace `:443` and Hive `:8443` routes remain separate. The former HTTP PWA shortcut must be replaced with the new HTTPS address.
 
 ## Features
 - **Real ON/OFF for OpenChamber Server** — not just firing the `.lnk` blindly. Status via `Get-NetTCPConnection -LocalPort 3000 -State Listen` + `openchamber stop` / `openchamber --lan --port 3000 --ui-password ...` with port verification after. Green RUNNING / Red STOPPED.

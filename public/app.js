@@ -2,6 +2,15 @@ const grid = document.getElementById('grid');
 const sub = document.getElementById('sub');
 const health = document.getElementById('health');
 const toast = document.getElementById('toast');
+let controlsCsrf = '';
+const originalFetch = window.fetch.bind(window);
+window.fetch = (url, options = {}) => {
+  if (options.method && !['GET', 'HEAD'].includes(options.method.toUpperCase())) {
+    options = { ...options, headers: { ...options.headers, 'x-controls-csrf': controlsCsrf } };
+  }
+  return originalFetch(url, options).then(response=>{if(response.status===401)location.replace('/');return response;});
+};
+document.querySelector('#sign-out')?.addEventListener('click',async()=>{const response=await fetch('/api/logout',{method:'POST',headers:{'content-type':'application/json'},body:'{}'});if(response.ok)location.replace('/');else showToast('Could not sign out. Try again.',false);});
 
 let toastTimer = null;
 function showToast(msg, ok = true) {
@@ -31,6 +40,7 @@ let built = false;
 let signature = '';
 
 function statusFor(item) {
+  if (item.id === 'hive-mobile') return status['hive-mobile'];
   if (item.id === 'openchamber-server') return status['openchamber-server'];
   if (item.id === 'Blender_Local_Control') return status['Blender_Local_Control'];
   if (item.id === 'Blender_Server_Control') return status['Blender_Server_Control'];
@@ -124,7 +134,7 @@ function paint() {
 async function load() {
   try {
     const [itRes, stRes] = await Promise.all([fetch('/api/items'), fetch('/api/status')]);
-    items = (await itRes.json()).filter(item => !['studio-server', 'wakatime-session', 'wakatime-session-watch', 'WakaTime_Mobile_Control'].includes(item.id));
+    items = (await itRes.json()).filter(item => !['studio-server', 'wakatime-session', 'wakatime-session-watch', 'WakaTime_Mobile_Control'].includes(item.id)).map(item => item.id === 'hive-mobile' ? { ...item, name: 'K3 Hive Server' } : item);
     items.push({ id: 'wakatime-tracking', name: 'WakaTime Tracking', type: 'toggle', icon: '⌚', description: 'One switch for session tracking and the PC + phone heartbeat watcher.' });
     status = await stRes.json();
     const sig = items.map(i => i.id).join('|');
@@ -160,6 +170,7 @@ async function setWakatimeTracking(enabled) {
 }
 
 async function doToggle(it, card) {
+  if (it.id === 'hive-mobile' && status['hive-mobile']?.alive && !confirm('Stop K3 Hive Server? Paired devices will be signed out and active work may be interrupted.')) return;
   card.style.opacity = '.55';
   try {
     if (it.id === 'wakatime-tracking') {
@@ -238,7 +249,6 @@ async function doRun(it, btn) {
   btn.textContent = 'Run';
 }
 
-load();
-refreshHealth();
+originalFetch('/api/session').then(response => { if (!response.ok) throw new Error('Pairing expired'); return response.json(); }).then(session => { controlsCsrf = session.csrf; load(); refreshHealth(); }).catch(() => location.replace('/'));
 setInterval(load, 5000);
 setInterval(refreshHealth, 10000);
